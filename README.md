@@ -31,6 +31,9 @@ The tool follows a simple naming convention: create network locations that match
 
 If your home WiFi is named `HomeNetwork_5G`, create a network location called `HomeNetwork_5G`. The switcher will automatically switch to this location when you connect to your home network. For any WiFi networks without a matching location name, the system defaults to the `Automatic` location.
 
+You can find the locations tab in Settings -> Network -> Three ... in the lower right:
+![WiFi Location Example](wifi-locations-example.png "WiFi Locations in network settings")
+
 ## Advanced Configuration
 
 ### Network Alias Mapping
