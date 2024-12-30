@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+
+# config
+LOGS_PATH=$HOME/Library/Logs/osxwifilocations.log
+DEFAULT_NETWORK_LOCATION=Automatic
+CONFIG_DIR=$HOME/.osx-wifi-locations
+ALIAS_CFG_PATH=$CONFIG_DIR/alias.conf
+MAX_LOG_SIZE_MB=10
+
+# verbose levels - set to true for detailed logging
+VERBOSE=false
+
+# reset log file if size > MAX_LOG_SIZE_MB
+rotate_logs() {
+    local size=$(stat -f%z "$LOGS_PATH" 2>/dev/null || echo "0")
+    local max_size=$((MAX_LOG_SIZE_MB * 1024 * 1024))
+    
+    if [ "$size" -gt "$max_size" ]; then
+        mv "$LOGS_PATH" "$LOGS_PATH.old"
+        touch "$LOGS_PATH"
+        log "Log file rotated due to size > ${MAX_LOG_SIZE_MB}MB"
+    fi
+}
+
+# logging
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date +"[%Y-%m-%d %H:%M:%S]")
+
+    case $level in
+        "ERROR" | "INFO")
+            echo -e "$timestamp [$level] $message" >> "$LOGS_PATH"
+            ;;
+        "DEBUG")
+            [ "$VERBOSE" = true ] && echo -e "$timestamp [DEBUG] $message" >> "$LOGS_PATH"
+            ;;
+    esac
+}
+
+# check and execute location/wifi script(s)
+exec_location_script() {
+    local location=$1
+    local script_file="$CONFIG_DIR/$location"
+
+    log "DEBUG" "Finding script for '$location'"
+
+    if [ -f "$script_file" ]; then
+        log "INFO" "Executing script '$script_file'"
+        chmod +x "$script_file"
+        "$script_file"
+    else
+        log "DEBUG" "No script for '$location' found"
+    fi
+}
+
+main() {
+    # create log file if it doesn't exist
+    touch "$LOGS_PATH"
+
+    # check log size and rotate if necessary
+    rotate_logs
+
+    sleep 3 # sleep to ensure descriptors and logs are ready
+
+    # fetch SSID
+    local wifi_name
+    wifi_name=$(ipconfig getsummary en0 | awk -F ' SSID : ' '/ SSID : / {print $2}')
+    log "INFO" "Connected WiFi: '$wifi_name'"
+
+    [ -z "$wifi_name" ] && log "ERROR" "WiFi name is empty" && exit 0
+
+    # get network locations
+    local network_locations
+    network_locations=$(networksetup -listlocations | xargs)
+    log "DEBUG" "Available Network Locations: $network_locations"
+
+    # get current network location
+    local current_network_location
+    current_network_location=$(networksetup -getcurrentlocation)
+    log "DEBUG" "Current Network Location: '$current_network_location'"
+
+    # check for aliases
+    local alias_location="$wifi_name"
+    if [ -f "$ALIAS_CFG_PATH" ]; then
+        log "DEBUG" "Reading alias configuration at '$ALIAS_CFG_PATH'"
+        alias_location=$(grep "$wifi_name=" "$ALIAS_CFG_PATH" | sed -nE 's/.*=(.*)/\1/p') || alias_location="$wifi_name"
+    fi
+
+    # check if the alias is valid
+    local is_alias_valid
+    is_alias_valid=$(echo "$network_locations" | grep -w "$alias_location" && echo "true" || echo "false")
+
+    if [ "$is_alias_valid" == "false" ]; then
+        log "INFO" "Switching to default location: '$DEFAULT_NETWORK_LOCATION'"
+        networksetup -switchtolocation "$DEFAULT_NETWORK_LOCATION"
+        exec_location_script "$DEFAULT_NETWORK_LOCATION"
+        exit 0
+    fi
+
+    if [ "$alias_location" != "$current_network_location" ]; then
+        log "INFO" "Switching to alias location: '$alias_location'"
+        networksetup -switchtolocation "$alias_location"
+        exec_location_script "$alias_location"
+    else
+        log "DEBUG" "No location switch required"
+    fi
+}
+
+# main
+main
