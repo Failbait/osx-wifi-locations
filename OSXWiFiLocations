@@ -6,6 +6,8 @@ DEFAULT_NETWORK_LOCATION=Automatic
 CONFIG_DIR=$HOME/.osx-wifi-locations
 ALIAS_CFG_PATH=$CONFIG_DIR/alias.conf
 MAX_LOG_SIZE_MB=10
+MAX_RETRIES=3
+RETRY_DELAY=1
 
 # verbose levels - set to true for detailed logging
 VERBOSE=false
@@ -26,8 +28,7 @@ rotate_logs() {
 log() {
     local level="$1"
     local message="$2"
-    local timestamp
-    timestamp=$(date +"[%Y-%m-%d %H:%M:%S]")
+    local timestamp=$(date +"[%Y-%m-%d %H:%M:%S]")
 
     case $level in
         "ERROR" | "INFO")
@@ -37,6 +38,47 @@ log() {
             [ "$VERBOSE" = true ] && echo -e "$timestamp [DEBUG] $message" >> "$LOGS_PATH"
             ;;
     esac
+}
+
+# attempts to switch location, fails after MAX_RETRIES attempts
+switch_location() {
+    local target_location=$1
+    local attempts=0
+    local success=false
+
+    while [ $attempts -lt $MAX_RETRIES ] && [ "$success" = false ]; do
+        if networksetup -switchtolocation "$target_location" 2>/dev/null; then
+            success=true
+            log "INFO" "Successfully switched to location: '$target_location' (attempt $((attempts + 1)))"
+        else
+            attempts=$((attempts + 1))
+            log "ERROR" "Failed to switch location (attempt $attempts)"
+            sleep $RETRY_DELAY
+        fi
+    done
+
+    if [ "$success" = false ]; then
+        log "ERROR" "Failed to switch location after $MAX_RETRIES attempts"
+        return 1
+    fi
+
+    return 0
+}
+
+# gets current network
+get_wifi_name() {
+    local wifi_name=""
+    local attempts=0
+
+    while [ -z "$wifi_name" ] && [ $attempts -lt $MAX_RETRIES ]; do
+        wifi_name=$(ipconfig getsummary en0 | awk -F ' SSID : ' '/ SSID : / {print $2}')
+        [ -z "$wifi_name" ] && {
+            attempts=$((attempts + 1))
+            sleep $RETRY_DELAY
+        }
+    done
+
+    echo "$wifi_name"
 }
 
 # check and execute location/wifi script(s)
@@ -66,10 +108,12 @@ main() {
 
     # fetch SSID
     local wifi_name
-    wifi_name=$(ipconfig getsummary en0 | awk -F ' SSID : ' '/ SSID : / {print $2}')
+    wifi_name=$(get_wifi_name)
+    [ -z "$wifi_name" ] && {
+        log "ERROR" "Failed to get WiFi name"
+        exit 1
+    }
     log "INFO" "Connected WiFi: '$wifi_name'"
-
-    [ -z "$wifi_name" ] && log "ERROR" "WiFi name is empty" && exit 0
 
     # get network locations
     local network_locations
@@ -77,36 +121,35 @@ main() {
     log "DEBUG" "Available Network Locations: $network_locations"
 
     # get current network location
-    local current_network_location
-    current_network_location=$(networksetup -getcurrentlocation)
-    log "DEBUG" "Current Network Location: '$current_network_location'"
+    local current_location
+    current_location=$(networksetup -getcurrentlocation)
+    log "DEBUG" "Current Network Location: '$current_location'"
 
-    # check for aliases
-    local alias_location="$wifi_name"
+    # check for alias locations
+    local target_location="$wifi_name"
     if [ -f "$ALIAS_CFG_PATH" ]; then
         log "DEBUG" "Reading alias configuration at '$ALIAS_CFG_PATH'"
-        alias_location=$(grep "$wifi_name=" "$ALIAS_CFG_PATH" | sed -nE 's/.*=(.*)/\1/p') || alias_location="$wifi_name"
+        local alias_location
+        alias_location=$(grep "^$wifi_name=" "$ALIAS_CFG_PATH" | sed -nE 's/.*=(.*)/\1/p')
+        [ -n "$alias_location" ] && target_location="$alias_location"
     fi
 
-    # check if the alias is valid
-    local is_alias_valid
-    is_alias_valid=$(echo "$network_locations" | grep -w "$alias_location" && echo "true" || echo "false")
+    # verify location
+    local is_valid_location
+    is_valid_location=$(echo "$network_locations" | grep -w "$target_location" && echo "true" || echo "false")
 
-    if [ "$is_alias_valid" == "false" ]; then
-        log "INFO" "Switching to default location: '$DEFAULT_NETWORK_LOCATION'"
-        networksetup -switchtolocation "$DEFAULT_NETWORK_LOCATION"
-        exec_location_script "$DEFAULT_NETWORK_LOCATION"
-        exit 0
+    if [ "$is_valid_location" = "false" ]; then
+        log "INFO" "Target location invalid, using default: '$DEFAULT_NETWORK_LOCATION'"
+        target_location="$DEFAULT_NETWORK_LOCATION"
     fi
 
-    if [ "$alias_location" != "$current_network_location" ]; then
-        log "INFO" "Switching to alias location: '$alias_location'"
-        networksetup -switchtolocation "$alias_location"
-        exec_location_script "$alias_location"
-    else
+    # switch location, execute scripts if any
+    [ "$target_location" != "$current_location" ] && {
+        switch_location "$target_location" && exec_location_script "$target_location"
+    } || {
         log "DEBUG" "No location switch required"
-    fi
+    }
 }
 
-# main
+# mainy mcmainface
 main
